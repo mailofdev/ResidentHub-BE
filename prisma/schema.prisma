@@ -10,14 +10,256 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  password  String
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@map("users")
+enum Role {
+  PLATFORM_OWNER
+  SOCIETY_ADMIN
+  RESIDENT
 }
 
+enum AccountStatus {
+  ACTIVE
+  PENDING_APPROVAL
+  SUSPENDED
+}
+
+enum SocietyType {
+  APARTMENT
+  VILLA
+  ROW_HOUSE
+}
+
+enum SocietyStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum UnitType {
+  ONE_BHK
+  TWO_BHK
+  THREE_BHK
+  FOUR_BHK
+  VILLA
+}
+
+enum OwnershipType {
+  OWNER
+  TENANT
+}
+
+enum UnitStatus {
+  OCCUPIED
+  VACANT
+}
+
+model User {
+  id                String        @id @default(uuid())
+  name              String
+  email             String        @unique
+  passwordHash      String        @map("password_hash")
+  role              Role          @default(SOCIETY_ADMIN)
+  status            AccountStatus @default(ACTIVE)
+  societyId         String?       @map("society_id")
+  unitId            String?       @map("unit_id")
+  createdBy         String?       @map("created_by")
+  lastLoginAt       DateTime?     @map("last_login_at")
+  passwordResetToken String?       @map("password_reset_token")
+  passwordResetExpires DateTime?   @map("password_reset_expires")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  createdSocieties  Society[]     @relation("SocietyCreator")
+  createdUnits      Unit[]        @relation("UnitCreator")
+  society           Society?      @relation(fields: [societyId], references: [id])
+  unit              Unit?         @relation(fields: [unitId], references: [id])
+  joinRequest       ResidentJoinRequest?
+  raisedIssues      Issue[]
+  createdAnnouncements Announcement[]
+
+  @@map("users")
+  @@index([societyId])
+  @@index([unitId])
+}
+
+model Society {
+  id                String        @id @default(uuid())
+  name              String
+  code              String        @unique
+  addressLine1      String        @map("address_line1")
+  city              String
+  state             String
+  pincode           String
+  societyType       SocietyType   @map("society_type")
+  createdBy         String        @map("created_by")
+  status            SocietyStatus @default(ACTIVE)
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  creator           User          @relation("SocietyCreator", fields: [createdBy], references: [id])
+  units             Unit[]
+  residents         User[]
+  joinRequests      ResidentJoinRequest[]
+  maintenance       Maintenance[]
+  issues            Issue[]
+  announcements     Announcement[]
+
+  @@map("societies")
+  @@index([createdBy])
+  @@index([code])
+}
+
+model Unit {
+  id                String        @id @default(uuid())
+  societyId         String        @map("society_id")
+  buildingName      String        @map("building_name")
+  unitNumber        String        @map("unit_number")
+  floorNumber       Int?          @map("floor_number")
+  unitType          UnitType      @map("unit_type")
+  areaSqFt          Float?        @map("area_sq_ft")
+  ownershipType     OwnershipType @map("ownership_type")
+  status            UnitStatus   @default(OCCUPIED)
+  createdBy         String?       @map("created_by")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  society           Society       @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  creator           User?         @relation("UnitCreator", fields: [createdBy], references: [id])
+  residents         User[]
+  joinRequests      ResidentJoinRequest[]
+  maintenance       Maintenance[]
+
+  @@map("units")
+  @@unique([societyId, buildingName, unitNumber])
+  @@index([societyId])
+  @@index([buildingName])
+}
+
+enum JoinRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CLOSED
+}
+
+model ResidentJoinRequest {
+  id                String            @id @default(uuid())
+  userId            String            @unique @map("user_id")
+  societyId         String            @map("society_id")
+  buildingId        String?           @map("building_id")
+  unitId            String            @map("unit_id")
+  status            JoinRequestStatus @default(PENDING)
+  rejectionReason   String?           @map("rejection_reason")
+  reviewedBy        String?           @map("reviewed_by")
+  reviewedAt        DateTime?         @map("reviewed_at")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  // Relations
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  society           Society           @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  unit              Unit              @relation(fields: [unitId], references: [id], onDelete: Cascade)
+
+  @@map("resident_join_requests")
+  @@index([societyId])
+  @@index([unitId])
+  @@index([status])
+}
+
+enum MaintenanceStatus {
+  UPCOMING
+  DUE
+  PAID
+  OVERDUE
+}
+
+model Maintenance {
+  id                String            @id @default(uuid())
+  societyId         String            @map("society_id")
+  unitId            String            @map("unit_id")
+  month             Int               // 1-12
+  year              Int               // e.g., 2024
+  amount            Float
+  dueDate           DateTime          @map("due_date")
+  status            MaintenanceStatus @default(UPCOMING)
+  paidAt            DateTime?         @map("paid_at")
+  paidBy            String?           @map("paid_by")
+  notes             String?
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  // Relations
+  society           Society           @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  unit              Unit              @relation(fields: [unitId], references: [id], onDelete: Cascade)
+
+  @@map("maintenance")
+  @@unique([societyId, unitId, month, year])
+  @@index([societyId])
+  @@index([unitId])
+  @@index([status])
+  @@index([dueDate])
+}
+
+enum IssueStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum IssuePriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Issue {
+  id                String          @id @default(uuid())
+  societyId         String          @map("society_id")
+  unitId            String?         @map("unit_id")
+  raisedBy          String          @map("raised_by")
+  title             String
+  description       String
+  status            IssueStatus     @default(OPEN)
+  priority          IssuePriority   @default(MEDIUM)
+  resolutionNotes   String?         @map("resolution_notes")
+  resolvedBy        String?         @map("resolved_by")
+  resolvedAt        DateTime?       @map("resolved_at")
+  closedAt          DateTime?       @map("closed_at")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+
+  // Relations
+  society           Society         @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  raiser            User            @relation(fields: [raisedBy], references: [id], onDelete: Cascade)
+
+  @@map("issues")
+  @@index([societyId])
+  @@index([unitId])
+  @@index([raisedBy])
+  @@index([status])
+  @@index([priority])
+}
+
+model Announcement {
+  id                String          @id @default(uuid())
+  societyId         String          @map("society_id")
+  createdBy         String          @map("created_by")
+  title             String
+  content           String
+  isImportant       Boolean         @default(false) @map("is_important")
+  expiresAt         DateTime?       @map("expires_at")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+
+  // Relations
+  society           Society         @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  creator           User            @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+
+  @@map("announcements")
+  @@index([societyId])
+  @@index([createdBy])
+  @@index([expiresAt])
+}

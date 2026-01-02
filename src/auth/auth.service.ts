@@ -7,212 +7,175 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
-import { RegisterDto } from './dto/register.dto';
+import { UsersService } from '../users/users.service';
 import { LoginDto } from './dto/login.dto';
-import { ChangePasswordDto } from './dto/change-password.dto';
+import { SignupAdminDto } from './dto/signup-admin.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
-import * as bcrypt from 'bcrypt';
+import { Role } from './enums/role.enum';
+import { AccountStatus } from './enums/account-status.enum';
+import { UserPayload, UserResponse } from '../users/user.schema';
+import { hashPassword, verifyPassword } from './utils/password.util';
+import { generateResetToken, getTokenExpiration } from './utils/token.util';
 
 @Injectable()
 export class AuthService {
   constructor(
     private prisma: PrismaService,
+    private usersService: UsersService,
     private jwtService: JwtService,
   ) {}
 
   /**
-   * Register a new user
-   * @param registerDto - User registration data (email, password, name)
+   * Society Admin Signup
+   * Creates user with role SOCIETY_ADMIN and status ACTIVE
+   * @param signupDto - Society admin signup data
    * @returns JWT token and user information
-   * @throws ConflictException if user with email already exists
    */
-  async register(registerDto: RegisterDto) {
-    const { email, password, name } = registerDto;
+  async signup(signupDto: SignupAdminDto) {
+    const { name, email, password } = signupDto;
 
     // Check if user already exists
-    const existingUser = await this.prisma.user.findUnique({
-      where: { email },
-    });
-
+    const existingUser = await this.usersService.findByEmail(email);
     if (existingUser) {
       throw new ConflictException('User with this email already exists');
     }
 
-    // Hash password with bcrypt (10 salt rounds)
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Hash password
+    const passwordHash = await hashPassword(password);
 
-    // Create user in database
+    // Create user with SOCIETY_ADMIN role and ACTIVE status
     const user = await this.prisma.user.create({
       data: {
+        name,
         email,
-        password: hashedPassword,
-        name: name || null,
+        passwordHash,
+        role: Role.SOCIETY_ADMIN,
+        status: AccountStatus.ACTIVE,
       },
       select: {
         id: true,
-        email: true,
         name: true,
+        email: true,
+        role: true,
+        status: true,
+        societyId: true,
+        unitId: true,
+        createdBy: true,
+        lastLoginAt: true,
         createdAt: true,
         updatedAt: true,
       },
     });
 
-    // Generate JWT token for immediate authentication
-    const accessToken = this.generateToken(user.id, user.email);
+    // Generate JWT token
+    const accessToken = this.generateToken({
+      sub: user.id,
+      role: user.role,
+      societyId: user.societyId,
+      unitId: user.unitId,
+    });
 
     return {
       accessToken,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-      },
+      user: this.mapToUserResponse(user),
     };
   }
 
   /**
-   * Authenticate user and return JWT token
-   * @param loginDto - User login credentials (email, password)
+   * Login
+   * Validates credentials and returns JWT token
+   * Blocks login if status !== ACTIVE
+   * Updates lastLoginAt
+   * @param loginDto - Login credentials
    * @returns JWT token and user information
-   * @throws UnauthorizedException if credentials are invalid
    */
   async login(loginDto: LoginDto) {
     const { email, password } = loginDto;
 
     // Find user by email
-    const user = await this.prisma.user.findUnique({
-      where: { email },
-    });
-
+    const user = await this.usersService.findByEmail(email);
     if (!user) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    // Verify password using bcrypt
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-
+    // Verify password
+    const isPasswordValid = await verifyPassword(password, user.passwordHash);
     if (!isPasswordValid) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    // Generate JWT token for authenticated user
-    const accessToken = this.generateToken(user.id, user.email);
+    // Check account status - ACTIVE and PENDING_APPROVAL users can login
+    // PENDING_APPROVAL users can login but will be blocked by AccountStatusGuard on protected routes
+    if (user.status === AccountStatus.SUSPENDED) {
+      throw new UnauthorizedException(
+        'Your account has been suspended. Please contact support.',
+      );
+    }
+
+    // Update last login timestamp
+    await this.usersService.updateLastLogin(user.id);
+
+    // Generate JWT token
+    const accessToken = this.generateToken({
+      sub: user.id,
+      role: user.role,
+      societyId: user.societyId,
+      unitId: user.unitId,
+    });
 
     return {
       accessToken,
       user: {
         id: user.id,
-        email: user.email,
         name: user.name,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        societyId: user.societyId,
+        unitId: user.unitId,
+        createdBy: user.createdBy,
+        lastLoginAt: user.lastLoginAt,
       },
     };
   }
 
   /**
-   * Validate user by ID (used by JWT strategy)
-   * @param userId - User ID from JWT token
-   * @returns User object without password
+   * Get current user profile
+   * @param userId - User ID from authenticated request
+   * @returns User profile information
    */
-  async validateUser(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
-
+  async getProfile(userId: string): Promise<UserResponse> {
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
     return user;
   }
 
   /**
-   * Change user password
+   * Update user profile
    * @param userId - User ID from authenticated request
-   * @param changePasswordDto - Contains current password and new password
-   * @throws UnauthorizedException if current password is incorrect
-   * @throws BadRequestException if new password is same as current password
+   * @param updateDto - Update data (name, password)
+   * @returns Updated user profile
    */
-  async changePassword(userId: string, changePasswordDto: ChangePasswordDto) {
-    const { currentPassword, newPassword } = changePasswordDto;
+  async updateProfile(
+    userId: string,
+    updateDto: UpdateProfileDto,
+  ): Promise<UserResponse> {
+    const { name, password } = updateDto;
 
-    // Find user with password field included
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        password: true,
-        email: true,
-      },
-    });
-
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-
-    // Verify current password
-    const isCurrentPasswordValid = await bcrypt.compare(
-      currentPassword,
-      user.password,
-    );
-
-    if (!isCurrentPasswordValid) {
-      throw new UnauthorizedException('Current password is incorrect');
-    }
-
-    // Check if new password is different from current password
-    if (currentPassword === newPassword) {
-      throw new BadRequestException(
-        'New password must be different from current password',
-      );
-    }
-
-    // Hash new password
-    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-
-    // Update password
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        password: hashedNewPassword,
-      },
-    });
-
-    return {
-      message: 'Password changed successfully',
-    };
-  }
-
-  /**
-   * Update user profile information
-   * @param userId - User ID from authenticated request
-   * @param updateProfileDto - Contains fields to update (name, email)
-   * @throws ConflictException if email is already taken by another user
-   */
-  async updateProfile(userId: string, updateProfileDto: UpdateProfileDto) {
-    const { name, email } = updateProfileDto;
-
-    // Build update data object (only include fields that are provided)
-    const updateData: { name?: string | null; email?: string } = {};
+    // Build update data
+    const updateData: { name?: string; passwordHash?: string } = {};
 
     if (name !== undefined) {
-      updateData.name = name || null; // Allow setting name to null
+      updateData.name = name;
     }
 
-    // If email is being updated, check if it's already taken
-    if (email !== undefined) {
-      const existingUser = await this.prisma.user.findUnique({
-        where: { email },
-      });
-
-      // If email exists and belongs to a different user, throw error
-      if (existingUser && existingUser.id !== userId) {
-        throw new ConflictException('Email is already taken by another user');
-      }
-
-      updateData.email = email;
+    if (password !== undefined) {
+      // Hash new password
+      updateData.passwordHash = await hashPassword(password);
     }
 
     // If no fields to update, return error
@@ -221,40 +184,113 @@ export class AuthService {
     }
 
     // Update user profile
-    const updatedUser = await this.prisma.user.update({
-      where: { id: userId },
-      data: updateData,
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    return this.usersService.updateProfile(userId, updateData);
+  }
 
-    // If email was updated, generate new token with updated email
-    let accessToken: string | undefined;
-    if (email !== undefined) {
-      accessToken = this.generateToken(updatedUser.id, updatedUser.email);
+  /**
+   * Forgot Password
+   * Generates reset token and stores it
+   * @param forgotPasswordDto - Contains email
+   * @returns Success message
+   */
+  async forgotPassword(forgotPasswordDto: ForgotPasswordDto) {
+    const { email } = forgotPasswordDto;
+
+    // Find user by email
+    const user = await this.usersService.findByEmail(email);
+    if (!user) {
+      // Return success even if user doesn't exist (security best practice)
+      return {
+        message:
+          'If an account with that email exists, a password reset link has been sent.',
+      };
     }
 
+    // Generate reset token
+    const resetToken = generateResetToken();
+    const resetExpires = getTokenExpiration(1); // 1 hour expiration
+
+    // Store reset token
+    await this.usersService.updatePasswordResetToken(
+      user.id,
+      resetToken,
+      resetExpires,
+    );
+
+    // TODO: Send email with reset token
+    // In production, send email with reset link containing the token
+    // For now, we'll just return the token in development (remove in production)
+    console.log(`Password reset token for ${email}: ${resetToken}`);
+
     return {
-      message: 'Profile updated successfully',
-      user: updatedUser,
-      ...(accessToken && { accessToken }), // Include new token only if email was updated
+      message:
+        'If an account with that email exists, a password reset link has been sent.',
+      // Remove this in production - only for development/testing
+      ...(process.env.NODE_ENV === 'development' && { resetToken }),
     };
   }
 
   /**
+   * Reset Password
+   * Validates token and updates password
+   * @param resetPasswordDto - Contains token and new password
+   * @returns Success message
+   */
+  async resetPassword(resetPasswordDto: ResetPasswordDto) {
+    const { token, password } = resetPasswordDto;
+
+    // Find user by reset token
+    const user = await this.usersService.findByPasswordResetToken(token);
+    if (!user) {
+      throw new BadRequestException('Invalid or expired reset token');
+    }
+
+    // Hash new password
+    const passwordHash = await hashPassword(password);
+
+    // Update password and clear reset token
+    await this.usersService.updatePassword(user.id, passwordHash);
+
+    return {
+      message: 'Password reset successfully',
+    };
+  }
+
+  /**
+   * Validate user by ID (used by JWT strategy)
+   * @param userId - User ID from JWT token
+   * @returns User object with role and status
+   */
+  async validateUser(userId: string): Promise<UserResponse | null> {
+    return this.usersService.findById(userId);
+  }
+
+  /**
    * Generate JWT token for user
-   * @param userId - User ID
-   * @param email - User email
+   * JWT payload: { sub: userId, role, societyId, unitId }
+   * @param payload - User payload
    * @returns JWT token string
    */
-  private generateToken(userId: string, email: string): string {
-    const payload = { sub: userId, email };
+  private generateToken(payload: UserPayload): string {
     return this.jwtService.sign(payload);
   }
-}
 
+  /**
+   * Map Prisma user to UserResponse
+   */
+  private mapToUserResponse(user: any): UserResponse {
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+      societyId: user.societyId,
+      unitId: user.unitId,
+      createdBy: user.createdBy,
+      lastLoginAt: user.lastLoginAt,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    };
+  }
+}
