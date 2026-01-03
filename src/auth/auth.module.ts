@@ -6,10 +6,16 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { PrismaModule } from '../prisma/prisma.module';
+import { UsersModule } from '../users/users.module';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { RolesGuard } from './guards/roles.guard';
+import { AccountStatusGuard } from './guards/account-status.guard';
+import { SocietyGuard } from './guards/society.guard';
 
 @Module({
   imports: [
     PrismaModule,
+    UsersModule,
     PassportModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -23,8 +29,21 @@ import { PrismaModule } from '../prisma/prisma.module';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
-  exports: [AuthService],
+  providers: [
+    AuthService,
+    JwtStrategy,
+    JwtAuthGuard,
+    RolesGuard,
+    AccountStatusGuard,
+    SocietyGuard,
+  ],
+  exports: [
+    AuthService,
+    JwtAuthGuard,
+    RolesGuard,
+    AccountStatusGuard,
+    SocietyGuard,
+    JwtModule,
+  ],
 })
 export class AuthModule {}
-
