@@ -6,31 +6,58 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateResidentJoinRequestDto } from './dto/create-resident-join-request.dto';
-import { ApproveResidentDto } from './dto/approve-resident.dto';
-import { Role, JoinRequestStatus, AccountStatus } from '@prisma/client';
+import { UsersService } from '../users/users.service';
+import { CreateResidentDto } from './dto/create-resident.dto';
+import { UpdateResidentDto } from './dto/update-resident.dto';
+import { Role, ResidentType, ResidentStatus, AccountStatus } from '@prisma/client';
 import { hashPassword } from '../auth/utils/password.util';
 
 @Injectable()
 export class ResidentsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private usersService: UsersService,
+  ) {}
 
   /**
-   * Create a resident join request
-   * Creates user with role RESIDENT and status PENDING_APPROVAL
-   * Creates join request record
+   * Create a resident (Admin only)
+   * Only SOCIETY_ADMIN can create residents
+   * Residents are created with ACTIVE status by default
+   * If password is provided, a User account is also created with RESIDENT role
    */
-  async createJoinRequest(
-    createDto: CreateResidentJoinRequestDto,
+  async createResident(
+    createDto: CreateResidentDto,
+    userId: string,
+    userRole: Role,
+    userSocietyId: string | null,
   ) {
-    const { name, email, password, societyId, unitId } = createDto;
+    // Only SOCIETY_ADMIN can create residents
+    if (userRole !== Role.SOCIETY_ADMIN) {
+      throw new ForbiddenException('Only society admins can create residents');
+    }
 
-    // Check if user already exists
-    const existingUser = await this.prisma.user.findUnique({
-      where: { email },
-    });
-    if (existingUser) {
-      throw new ConflictException('User with this email already exists');
+    if (!userSocietyId) {
+      throw new ForbiddenException('You must be associated with a society to create residents');
+    }
+
+    const {
+      societyId,
+      buildingId,
+      unitId,
+      residentType,
+      ownerId,
+      name,
+      email,
+      mobile,
+      emergencyContact,
+      startDate,
+      endDate,
+      password,
+    } = createDto;
+
+    // Validate admin owns the society
+    if (userSocietyId !== societyId) {
+      throw new ForbiddenException('You can only create residents in your own society');
     }
 
     // Verify society exists
@@ -53,78 +80,154 @@ export class ResidentsService {
       throw new BadRequestException('Unit does not belong to the specified society');
     }
 
-    // Check if unit already has an active resident
-    const existingResident = await this.prisma.user.findFirst({
-      where: {
-        unitId,
-        role: Role.RESIDENT,
-        status: AccountStatus.ACTIVE,
-      },
-    });
-    if (existingResident) {
-      throw new ConflictException('This unit already has an active resident');
+    // Validate resident type specific rules
+    if (residentType === ResidentType.OWNER) {
+      // Unit must not already have an active owner
+      if (unit.ownerId) {
+        const existingOwner = await this.prisma.resident.findUnique({
+          where: { id: unit.ownerId },
+        });
+        if (existingOwner && existingOwner.status === ResidentStatus.ACTIVE) {
+          throw new ConflictException('This unit already has an active owner');
+        }
+      }
+    } else if (residentType === ResidentType.TENANT) {
+      // Unit must not already have an active tenant
+      if (unit.tenantId) {
+        const existingTenant = await this.prisma.resident.findUnique({
+          where: { id: unit.tenantId },
+        });
+        if (existingTenant && existingTenant.status === ResidentStatus.ACTIVE) {
+          throw new ConflictException('This unit already has an active tenant');
+        }
+      }
+
+      // ownerId is mandatory for TENANT
+      if (!ownerId) {
+        throw new BadRequestException('Owner ID is required for tenant residents');
+      }
+
+      // Verify owner exists and belongs to the same society
+      const owner = await this.prisma.resident.findUnique({
+        where: { id: ownerId },
+      });
+      if (!owner) {
+        throw new NotFoundException('Owner not found');
+      }
+      if (owner.societyId !== societyId) {
+        throw new BadRequestException('Owner must belong to the same society');
+      }
+      if (owner.residentType !== ResidentType.OWNER) {
+        throw new BadRequestException('Owner ID must reference an owner resident');
+      }
+      if (owner.status !== ResidentStatus.ACTIVE) {
+        throw new BadRequestException('Owner must be active');
+      }
     }
 
-    // Hash password
-    const passwordHash = await hashPassword(password);
+    // Check for duplicate email within the same society
+    const existingEmail = await this.prisma.resident.findFirst({
+      where: {
+        societyId,
+        email,
+        status: ResidentStatus.ACTIVE,
+      },
+    });
+    if (existingEmail) {
+      throw new ConflictException('A resident with this email already exists in this society');
+    }
 
-    // Create user and join request in a transaction
+    // Check for duplicate mobile within the same society
+    const existingMobile = await this.prisma.resident.findFirst({
+      where: {
+        societyId,
+        mobile,
+        status: ResidentStatus.ACTIVE,
+      },
+    });
+    if (existingMobile) {
+      throw new ConflictException('A resident with this mobile number already exists in this society');
+    }
+
+    // If password is provided, check if User with email already exists
+    if (password) {
+      const existingUser = await this.usersService.findByEmail(email);
+      if (existingUser) {
+        throw new ConflictException('A user account with this email already exists');
+      }
+    }
+
+    // Hash password if provided
+    const passwordHash = password ? await hashPassword(password) : undefined;
+
+    // Create resident and update unit in a transaction
     const result = await this.prisma.$transaction(async (tx) => {
-      // Create user with RESIDENT role and PENDING_APPROVAL status
-      const user = await tx.user.create({
+      // Create resident with ACTIVE status
+      const resident = await tx.resident.create({
         data: {
+          societyId,
+          buildingId: buildingId || null,
+          unitId,
+          residentType,
+          ownerId: residentType === ResidentType.TENANT ? ownerId : null,
           name,
           email,
-          passwordHash,
-          role: Role.RESIDENT,
-          status: AccountStatus.PENDING_APPROVAL,
-          societyId,
-          unitId,
+          mobile,
+          emergencyContact: emergencyContact || null,
+          status: ResidentStatus.ACTIVE,
+          startDate: new Date(startDate),
+          endDate: endDate ? new Date(endDate) : null,
         },
       });
 
-      // Create join request
-      const joinRequest = await tx.residentJoinRequest.create({
-        data: {
-          userId: user.id,
-          societyId,
-          unitId,
-          status: JoinRequestStatus.PENDING,
-        },
-      });
+      // Update unit owner/tenant reference
+      if (residentType === ResidentType.OWNER) {
+        await tx.unit.update({
+          where: { id: unitId },
+          data: { ownerId: resident.id },
+        });
+      } else {
+        await tx.unit.update({
+          where: { id: unitId },
+          data: { tenantId: resident.id },
+        });
+      }
 
-      return { user, joinRequest };
+      // If password is provided, create User account with RESIDENT role
+      if (passwordHash) {
+        await tx.user.create({
+          data: {
+            name,
+            email,
+            passwordHash,
+            role: Role.RESIDENT,
+            status: AccountStatus.ACTIVE,
+            societyId,
+            unitId,
+            createdBy: userId,
+          },
+        });
+      }
+
+      return resident;
     });
 
-    return {
-      id: result.joinRequest.id,
-      userId: result.user.id,
-      status: result.joinRequest.status,
-      message: 'Join request submitted. Waiting for admin approval.',
-    };
+    return result;
   }
 
   /**
-   * Get all join requests for a society
-   * Only SOCIETY_ADMIN can view requests for their society
-   * PLATFORM_OWNER can view all requests
+   * Get all residents in a society
+   * Only SOCIETY_ADMIN can view residents in their society
+   * PLATFORM_OWNER can view all residents
    */
-  async getJoinRequests(
+  async getAllResidents(
     userRole: Role,
     userSocietyId: string | null,
   ) {
     if (userRole === Role.PLATFORM_OWNER) {
-      // Platform owner can see all requests
-      return this.prisma.residentJoinRequest.findMany({
+      // Platform owner can see all residents
+      return this.prisma.resident.findMany({
         include: {
-          user: {
-            select: {
-              id: true,
-              name: true,
-              email: true,
-              status: true,
-            },
-          },
           society: {
             select: {
               id: true,
@@ -137,6 +240,14 @@ export class ResidentsService {
               id: true,
               buildingName: true,
               unitNumber: true,
+              unitType: true,
+            },
+          },
+          owner: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
             },
           },
         },
@@ -146,70 +257,20 @@ export class ResidentsService {
       });
     }
 
-    // SOCIETY_ADMIN can only see requests for their society
+    // SOCIETY_ADMIN can only see residents in their society
     if (userRole !== Role.SOCIETY_ADMIN) {
-      throw new ForbiddenException('Only society admins can view join requests');
+      throw new ForbiddenException('Only society admins can view residents');
     }
 
     if (!userSocietyId) {
       return [];
     }
 
-    return this.prisma.residentJoinRequest.findMany({
+    return this.prisma.resident.findMany({
       where: {
         societyId: userSocietyId,
-        status: JoinRequestStatus.PENDING,
       },
       include: {
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            status: true,
-          },
-        },
-        society: {
-          select: {
-            id: true,
-            name: true,
-            code: true,
-          },
-        },
-        unit: {
-          select: {
-            id: true,
-            buildingName: true,
-            unitNumber: true,
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
-  }
-
-  /**
-   * Get a specific join request
-   */
-  async getJoinRequest(
-    requestId: string,
-    userRole: Role,
-    userSocietyId: string | null,
-  ) {
-    const joinRequest = await this.prisma.residentJoinRequest.findUnique({
-      where: { id: requestId },
-      include: {
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            status: true,
-            createdAt: true,
-          },
-        },
         society: {
           select: {
             id: true,
@@ -225,143 +286,30 @@ export class ResidentsService {
             unitType: true,
           },
         },
+        owner: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
       },
     });
-
-    if (!joinRequest) {
-      throw new NotFoundException('Join request not found');
-    }
-
-    // Access control
-    if (userRole !== Role.PLATFORM_OWNER && userSocietyId !== joinRequest.societyId) {
-      throw new ForbiddenException('You do not have access to this join request');
-    }
-
-    return joinRequest;
   }
 
   /**
-   * Approve a resident join request
-   * Only SOCIETY_ADMIN can approve requests for their society
+   * Get a specific resident by ID
    */
-  async approveResident(
-    requestId: string,
-    userId: string,
+  async getResidentById(
+    residentId: string,
     userRole: Role,
     userSocietyId: string | null,
   ) {
-    const joinRequest = await this.prisma.residentJoinRequest.findUnique({
-      where: { id: requestId },
-      include: {
-        user: true,
-        society: true,
-      },
-    });
-
-    if (!joinRequest) {
-      throw new NotFoundException('Join request not found');
-    }
-
-    // Access control - only SOCIETY_ADMIN can approve
-    if (userRole !== Role.SOCIETY_ADMIN && userRole !== Role.PLATFORM_OWNER) {
-      throw new ForbiddenException('Only society admins can approve residents');
-    }
-
-    if (userRole === Role.SOCIETY_ADMIN && userSocietyId !== joinRequest.societyId) {
-      throw new ForbiddenException('You can only approve residents in your own society');
-    }
-
-    if (joinRequest.status !== JoinRequestStatus.PENDING) {
-      throw new BadRequestException('This join request has already been processed');
-    }
-
-    // Update join request and user status in a transaction
-    await this.prisma.$transaction(async (tx) => {
-      // Update join request
-      await tx.residentJoinRequest.update({
-        where: { id: requestId },
-        data: {
-          status: JoinRequestStatus.APPROVED,
-          reviewedBy: userId,
-          reviewedAt: new Date(),
-        },
-      });
-
-      // Update user status to ACTIVE
-      await tx.user.update({
-        where: { id: joinRequest.userId },
-        data: {
-          status: AccountStatus.ACTIVE,
-        },
-      });
-    });
-
-    return {
-      message: 'Resident approved successfully',
-      joinRequestId: requestId,
-    };
-  }
-
-  /**
-   * Reject a resident join request
-   * Only SOCIETY_ADMIN can reject requests for their society
-   */
-  async rejectResident(
-    requestId: string,
-    approveDto: ApproveResidentDto,
-    userId: string,
-    userRole: Role,
-    userSocietyId: string | null,
-  ) {
-    const joinRequest = await this.prisma.residentJoinRequest.findUnique({
-      where: { id: requestId },
-      include: {
-        user: true,
-        society: true,
-      },
-    });
-
-    if (!joinRequest) {
-      throw new NotFoundException('Join request not found');
-    }
-
-    // Access control - only SOCIETY_ADMIN can reject
-    if (userRole !== Role.SOCIETY_ADMIN && userRole !== Role.PLATFORM_OWNER) {
-      throw new ForbiddenException('Only society admins can reject residents');
-    }
-
-    if (userRole === Role.SOCIETY_ADMIN && userSocietyId !== joinRequest.societyId) {
-      throw new ForbiddenException('You can only reject residents in your own society');
-    }
-
-    if (joinRequest.status !== JoinRequestStatus.PENDING) {
-      throw new BadRequestException('This join request has already been processed');
-    }
-
-    // Update join request
-    await this.prisma.residentJoinRequest.update({
-      where: { id: requestId },
-      data: {
-        status: JoinRequestStatus.REJECTED,
-        rejectionReason: approveDto.rejectionReason || null,
-        reviewedBy: userId,
-        reviewedAt: new Date(),
-      },
-    });
-
-    return {
-      message: 'Resident join request rejected',
-      joinRequestId: requestId,
-    };
-  }
-
-  /**
-   * Get resident's own join request status
-   * RESIDENT can check their approval status
-   */
-  async getMyJoinRequest(userId: string) {
-    const joinRequest = await this.prisma.residentJoinRequest.findUnique({
-      where: { userId },
+    const resident = await this.prisma.resident.findUnique({
+      where: { id: residentId },
       include: {
         society: {
           select: {
@@ -375,16 +323,209 @@ export class ResidentsService {
             id: true,
             buildingName: true,
             unitNumber: true,
+            unitType: true,
+            floorNumber: true,
+          },
+        },
+        owner: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            mobile: true,
+          },
+        },
+        tenants: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            mobile: true,
+            status: true,
           },
         },
       },
     });
 
-    if (!joinRequest) {
-      throw new NotFoundException('Join request not found');
+    if (!resident) {
+      throw new NotFoundException('Resident not found');
     }
 
-    return joinRequest;
+    // Access control
+    if (userRole === Role.PLATFORM_OWNER) {
+      return resident;
+    }
+
+    if (userRole === Role.SOCIETY_ADMIN) {
+      if (userSocietyId !== resident.societyId) {
+        throw new ForbiddenException('You can only view residents in your own society');
+      }
+      return resident;
+    }
+
+    throw new ForbiddenException('You do not have permission to view this resident');
+  }
+
+  /**
+   * Update resident
+   * Allow updating contact details and tenancy dates
+   * Prevent changing residentType once created
+   */
+  async updateResident(
+    residentId: string,
+    updateDto: UpdateResidentDto,
+    userRole: Role,
+    userSocietyId: string | null,
+  ) {
+    const resident = await this.prisma.resident.findUnique({
+      where: { id: residentId },
+    });
+
+    if (!resident) {
+      throw new NotFoundException('Resident not found');
+    }
+
+    // Only SOCIETY_ADMIN can update residents
+    if (userRole !== Role.SOCIETY_ADMIN && userRole !== Role.PLATFORM_OWNER) {
+      throw new ForbiddenException('Only society admins can update residents');
+    }
+
+    // Access control
+    if (userRole === Role.SOCIETY_ADMIN && userSocietyId !== resident.societyId) {
+      throw new ForbiddenException('You can only update residents in your own society');
+    }
+
+    // Check for duplicate email if email is being updated
+    if (updateDto.email && updateDto.email !== resident.email) {
+      const existingEmail = await this.prisma.resident.findFirst({
+        where: {
+          societyId: resident.societyId,
+          email: updateDto.email,
+          status: ResidentStatus.ACTIVE,
+          id: { not: residentId },
+        },
+      });
+      if (existingEmail) {
+        throw new ConflictException('A resident with this email already exists in this society');
+      }
+    }
+
+    // Check for duplicate mobile if mobile is being updated
+    if (updateDto.mobile && updateDto.mobile !== resident.mobile) {
+      const existingMobile = await this.prisma.resident.findFirst({
+        where: {
+          societyId: resident.societyId,
+          mobile: updateDto.mobile,
+          status: ResidentStatus.ACTIVE,
+          id: { not: residentId },
+        },
+      });
+      if (existingMobile) {
+        throw new ConflictException('A resident with this mobile number already exists in this society');
+      }
+    }
+
+    // Build update data
+    const updateData: any = {};
+    if (updateDto.name !== undefined) updateData.name = updateDto.name;
+    if (updateDto.email !== undefined) updateData.email = updateDto.email;
+    if (updateDto.mobile !== undefined) updateData.mobile = updateDto.mobile;
+    if (updateDto.emergencyContact !== undefined) {
+      updateData.emergencyContact = updateDto.emergencyContact || null;
+    }
+    if (updateDto.startDate !== undefined) {
+      updateData.startDate = new Date(updateDto.startDate);
+    }
+    if (updateDto.endDate !== undefined) {
+      updateData.endDate = updateDto.endDate ? new Date(updateDto.endDate) : null;
+    }
+
+    return this.prisma.resident.update({
+      where: { id: residentId },
+      data: updateData,
+      include: {
+        society: {
+          select: {
+            id: true,
+            name: true,
+            code: true,
+          },
+        },
+        unit: {
+          select: {
+            id: true,
+            buildingName: true,
+            unitNumber: true,
+            unitType: true,
+          },
+        },
+        owner: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+      },
+    });
+  }
+
+  /**
+   * Delete / Deactivate Resident
+   * Soft delete by setting status to SUSPENDED
+   * Clear unit owner/tenant reference accordingly
+   */
+  async deleteResident(
+    residentId: string,
+    userRole: Role,
+    userSocietyId: string | null,
+  ) {
+    const resident = await this.prisma.resident.findUnique({
+      where: { id: residentId },
+      include: {
+        unit: true,
+      },
+    });
+
+    if (!resident) {
+      throw new NotFoundException('Resident not found');
+    }
+
+    // Only SOCIETY_ADMIN can delete residents
+    if (userRole !== Role.SOCIETY_ADMIN && userRole !== Role.PLATFORM_OWNER) {
+      throw new ForbiddenException('Only society admins can delete residents');
+    }
+
+    // Access control
+    if (userRole === Role.SOCIETY_ADMIN && userSocietyId !== resident.societyId) {
+      throw new ForbiddenException('You can only delete residents in your own society');
+    }
+
+    // Delete resident and clear unit reference in a transaction
+    await this.prisma.$transaction(async (tx) => {
+      // Set resident status to SUSPENDED
+      await tx.resident.update({
+        where: { id: residentId },
+        data: { status: ResidentStatus.SUSPENDED },
+      });
+
+      // Clear unit owner/tenant reference
+      if (resident.residentType === ResidentType.OWNER) {
+        await tx.unit.update({
+          where: { id: resident.unitId },
+          data: { ownerId: null },
+        });
+      } else {
+        await tx.unit.update({
+          where: { id: resident.unitId },
+          data: { tenantId: null },
+        });
+      }
+    });
+
+    return {
+      message: 'Resident deactivated successfully',
+      residentId,
+    };
   }
 }
-

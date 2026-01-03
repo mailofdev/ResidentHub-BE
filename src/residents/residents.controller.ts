@@ -4,20 +4,20 @@ import {
   Post,
   Body,
   Param,
-  Patch,
+  Put,
+  Delete,
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { ResidentsService } from './residents.service';
-import { CreateResidentJoinRequestDto } from './dto/create-resident-join-request.dto';
-import { ApproveResidentDto } from './dto/approve-resident.dto';
+import { CreateResidentDto } from './dto/create-resident.dto';
+import { UpdateResidentDto } from './dto/update-resident.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { AccountStatusGuard } from '../auth/guards/account-status.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Role } from '../auth/enums/role.enum';
-import { Public } from '../auth/decorators/public.decorator';
 
 @ApiTags('Residents')
 @Controller('residents')
@@ -25,103 +25,84 @@ export class ResidentsController {
   constructor(private readonly residentsService: ResidentsService) {}
 
   /**
-   * Create a resident join request (Public - no auth required)
-   * Creates user with PENDING_APPROVAL status
+   * Create a resident (SOCIETY_ADMIN only)
+   * Creates resident with ACTIVE status
    */
-  @Public()
-  @Post('join-request')
-  @ApiOperation({ summary: 'Create a resident join request' })
-  async createJoinRequest(@Body() createDto: CreateResidentJoinRequestDto) {
-    return this.residentsService.createJoinRequest(createDto);
-  }
-
-  /**
-   * Get my join request status (RESIDENT only)
-   * Allows PENDING_APPROVAL users to check their status
-   */
-  @Get('my-join-request')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get my join request status' })
-  async getMyJoinRequest(@CurrentUser('id') userId: string) {
-    return this.residentsService.getMyJoinRequest(userId);
-  }
-
-  /**
-   * Get all join requests (SOCIETY_ADMIN, PLATFORM_OWNER)
-   */
-  @Get('join-requests')
+  @Post()
   @UseGuards(JwtAuthGuard, AccountStatusGuard, RolesGuard)
-  @Roles(Role.SOCIETY_ADMIN, Role.PLATFORM_OWNER)
+  @Roles(Role.SOCIETY_ADMIN)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get all join requests' })
-  async getJoinRequests(
-    @CurrentUser('role') userRole: Role,
-    @CurrentUser('societyId') userSocietyId: string | null,
-  ) {
-    return this.residentsService.getJoinRequests(userRole, userSocietyId);
-  }
-
-  /**
-   * Get a specific join request (SOCIETY_ADMIN, PLATFORM_OWNER)
-   */
-  @Get('join-requests/:id')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard, RolesGuard)
-  @Roles(Role.SOCIETY_ADMIN, Role.PLATFORM_OWNER)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get a specific join request' })
-  async getJoinRequest(
-    @Param('id') requestId: string,
-    @CurrentUser('role') userRole: Role,
-    @CurrentUser('societyId') userSocietyId: string | null,
-  ) {
-    return this.residentsService.getJoinRequest(requestId, userRole, userSocietyId);
-  }
-
-  /**
-   * Approve a resident (SOCIETY_ADMIN, PLATFORM_OWNER)
-   */
-  @Patch('join-requests/:id/approve')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard, RolesGuard)
-  @Roles(Role.SOCIETY_ADMIN, Role.PLATFORM_OWNER)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Approve a resident join request' })
-  async approveResident(
-    @Param('id') requestId: string,
+  @ApiOperation({ summary: 'Create a resident' })
+  async createResident(
+    @Body() createDto: CreateResidentDto,
     @CurrentUser('id') userId: string,
     @CurrentUser('role') userRole: Role,
     @CurrentUser('societyId') userSocietyId: string | null,
   ) {
-    return this.residentsService.approveResident(
-      requestId,
-      userId,
-      userRole,
-      userSocietyId,
-    );
+    return this.residentsService.createResident(createDto, userId, userRole, userSocietyId);
   }
 
   /**
-   * Reject a resident (SOCIETY_ADMIN, PLATFORM_OWNER)
+   * Get all residents (SOCIETY_ADMIN, PLATFORM_OWNER)
    */
-  @Patch('join-requests/:id/reject')
+  @Get()
   @UseGuards(JwtAuthGuard, AccountStatusGuard, RolesGuard)
   @Roles(Role.SOCIETY_ADMIN, Role.PLATFORM_OWNER)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Reject a resident join request' })
-  async rejectResident(
-    @Param('id') requestId: string,
-    @Body() approveDto: ApproveResidentDto,
-    @CurrentUser('id') userId: string,
+  @ApiOperation({ summary: 'Get all residents' })
+  async getAllResidents(
     @CurrentUser('role') userRole: Role,
     @CurrentUser('societyId') userSocietyId: string | null,
   ) {
-    return this.residentsService.rejectResident(
-      requestId,
-      approveDto,
-      userId,
-      userRole,
-      userSocietyId,
-    );
+    return this.residentsService.getAllResidents(userRole, userSocietyId);
+  }
+
+  /**
+   * Get a specific resident by ID (SOCIETY_ADMIN, PLATFORM_OWNER)
+   */
+  @Get(':id')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard, RolesGuard)
+  @Roles(Role.SOCIETY_ADMIN, Role.PLATFORM_OWNER)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get a specific resident' })
+  async getResidentById(
+    @Param('id') residentId: string,
+    @CurrentUser('role') userRole: Role,
+    @CurrentUser('societyId') userSocietyId: string | null,
+  ) {
+    return this.residentsService.getResidentById(residentId, userRole, userSocietyId);
+  }
+
+  /**
+   * Update resident (SOCIETY_ADMIN, PLATFORM_OWNER)
+   */
+  @Put(':id')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard, RolesGuard)
+  @Roles(Role.SOCIETY_ADMIN, Role.PLATFORM_OWNER)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Update a resident' })
+  async updateResident(
+    @Param('id') residentId: string,
+    @Body() updateDto: UpdateResidentDto,
+    @CurrentUser('role') userRole: Role,
+    @CurrentUser('societyId') userSocietyId: string | null,
+  ) {
+    return this.residentsService.updateResident(residentId, updateDto, userRole, userSocietyId);
+  }
+
+  /**
+   * Delete / Deactivate resident (SOCIETY_ADMIN, PLATFORM_OWNER)
+   */
+  @Delete(':id')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard, RolesGuard)
+  @Roles(Role.SOCIETY_ADMIN, Role.PLATFORM_OWNER)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Delete / Deactivate a resident' })
+  async deleteResident(
+    @Param('id') residentId: string,
+    @CurrentUser('role') userRole: Role,
+    @CurrentUser('societyId') userSocietyId: string | null,
+  ) {
+    return this.residentsService.deleteResident(residentId, userRole, userSocietyId);
   }
 }
-

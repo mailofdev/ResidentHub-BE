@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { Role, MaintenanceStatus, IssueStatus, JoinRequestStatus, AccountStatus } from '@prisma/client';
+import { Role, MaintenanceStatus, IssueStatus, AccountStatus, ResidentStatus } from '@prisma/client';
 
 @Injectable()
 export class DashboardService {
@@ -110,7 +110,6 @@ export class DashboardService {
     if (!societyId) {
       return {
         pendingMaintenanceDues: 0,
-        pendingJoinRequestsCount: 0,
         openIssuesCount: 0,
         recentAnnouncements: [],
         totalUnits: 0,
@@ -132,14 +131,6 @@ export class DashboardService {
       (sum, m) => sum + m.amount,
       0,
     );
-
-    // Get pending join requests count
-    const pendingJoinRequestsCount = await this.prisma.residentJoinRequest.count({
-      where: {
-        societyId,
-        status: JoinRequestStatus.PENDING,
-      },
-    });
 
     // Get open issues count
     const openIssuesCount = await this.prisma.issue.count({
@@ -181,17 +172,15 @@ export class DashboardService {
       where: { societyId },
     });
 
-    const totalResidents = await this.prisma.user.count({
+    const totalResidents = await this.prisma.resident.count({
       where: {
         societyId,
-        role: Role.RESIDENT,
-        status: AccountStatus.ACTIVE,
+        status: ResidentStatus.ACTIVE,
       },
     });
 
     return {
       pendingMaintenanceDues,
-      pendingJoinRequestsCount,
       openIssuesCount,
       recentAnnouncements,
       totalUnits,

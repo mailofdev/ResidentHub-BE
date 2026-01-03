@@ -8,8 +8,7 @@ import { AccountStatus } from '../enums/account-status.enum';
 
 /**
  * AccountStatusGuard - Ensures user account is ACTIVE
- * Blocks access if account status is SUSPENDED or PENDING_APPROVAL
- * PENDING_APPROVAL users can login but cannot access protected routes
+ * Blocks access if account status is SUSPENDED
  */
 @Injectable()
 export class AccountStatusGuard implements CanActivate {
@@ -26,11 +25,6 @@ export class AccountStatusGuard implements CanActivate {
       if (user.status === AccountStatus.SUSPENDED) {
         throw new ForbiddenException(
           'Your account has been suspended. Please contact support.',
-        );
-      }
-      if (user.status === AccountStatus.PENDING_APPROVAL) {
-        throw new ForbiddenException(
-          'Your account is pending approval. Please wait for admin approval.',
         );
       }
       throw new ForbiddenException('Your account is not active.');

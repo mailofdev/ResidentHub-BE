@@ -18,7 +18,6 @@ enum Role {
 
 enum AccountStatus {
   ACTIVE
-  PENDING_APPROVAL
   SUSPENDED
 }
 
@@ -51,6 +50,16 @@ enum UnitStatus {
   VACANT
 }
 
+enum ResidentType {
+  OWNER
+  TENANT
+}
+
+enum ResidentStatus {
+  ACTIVE
+  SUSPENDED
+}
+
 model User {
   id                String        @id @default(uuid())
   name              String
@@ -72,7 +81,6 @@ model User {
   createdUnits      Unit[]        @relation("UnitCreator")
   society           Society?      @relation(fields: [societyId], references: [id])
   unit              Unit?         @relation(fields: [unitId], references: [id])
-  joinRequest       ResidentJoinRequest?
   raisedIssues      Issue[]
   createdAnnouncements Announcement[]
 
@@ -99,7 +107,7 @@ model Society {
   creator           User          @relation("SocietyCreator", fields: [createdBy], references: [id])
   units             Unit[]
   residents         User[]
-  joinRequests      ResidentJoinRequest[]
+  residentsNew     Resident[]
   maintenance       Maintenance[]
   issues            Issue[]
   announcements     Announcement[]
@@ -119,6 +127,8 @@ model Unit {
   areaSqFt          Float?        @map("area_sq_ft")
   ownershipType     OwnershipType @map("ownership_type")
   status            UnitStatus   @default(OCCUPIED)
+  ownerId           String?       @unique @map("owner_id")
+  tenantId          String?       @unique @map("tenant_id")
   createdBy         String?       @map("created_by")
   createdAt         DateTime      @default(now()) @map("created_at")
   updatedAt         DateTime      @updatedAt @map("updated_at")
@@ -127,43 +137,51 @@ model Unit {
   society           Society       @relation(fields: [societyId], references: [id], onDelete: Cascade)
   creator           User?         @relation("UnitCreator", fields: [createdBy], references: [id])
   residents         User[]
-  joinRequests      ResidentJoinRequest[]
+  ownerResident     Resident?     @relation("UnitOwner", fields: [ownerId], references: [id])
+  tenantResident    Resident?     @relation("UnitTenant", fields: [tenantId], references: [id])
+  residentUnits     Resident[]    @relation("ResidentUnit")
   maintenance       Maintenance[]
 
   @@map("units")
   @@unique([societyId, buildingName, unitNumber])
   @@index([societyId])
   @@index([buildingName])
+  @@index([ownerId])
+  @@index([tenantId])
 }
 
-enum JoinRequestStatus {
-  PENDING
-  APPROVED
-  REJECTED
-  CLOSED
-}
-
-model ResidentJoinRequest {
-  id                String            @id @default(uuid())
-  userId            String            @unique @map("user_id")
-  societyId         String            @map("society_id")
-  buildingId        String?           @map("building_id")
-  unitId            String            @map("unit_id")
-  status            JoinRequestStatus @default(PENDING)
-  rejectionReason   String?           @map("rejection_reason")
-  reviewedBy        String?           @map("reviewed_by")
-  reviewedAt        DateTime?         @map("reviewed_at")
-  createdAt         DateTime          @default(now()) @map("created_at")
-  updatedAt         DateTime          @updatedAt @map("updated_at")
+model Resident {
+  id                String          @id @default(uuid())
+  societyId         String          @map("society_id")
+  buildingId        String?         @map("building_id")
+  unitId            String          @map("unit_id")
+  residentType      ResidentType    @map("resident_type")
+  ownerId           String?         @map("owner_id")
+  name              String
+  email             String
+  mobile            String
+  emergencyContact  String?         @map("emergency_contact")
+  status            ResidentStatus  @default(ACTIVE)
+  startDate         DateTime        @map("start_date")
+  endDate           DateTime?       @map("end_date")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
 
   // Relations
-  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  society           Society           @relation(fields: [societyId], references: [id], onDelete: Cascade)
-  unit              Unit              @relation(fields: [unitId], references: [id], onDelete: Cascade)
+  society           Society         @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  unit              Unit            @relation("ResidentUnit", fields: [unitId], references: [id], onDelete: Cascade)
+  unitAsOwner       Unit?           @relation("UnitOwner")
+  unitAsTenant      Unit?           @relation("UnitTenant")
+  owner             Resident?       @relation("ResidentOwner", fields: [ownerId], references: [id])
+  tenants           Resident[]      @relation("ResidentOwner")
 
-  @@map("resident_join_requests")
+  @@map("residents")
   @@index([societyId])
+  @@index([buildingId])
   @@index([unitId])
+  @@index([ownerId])
+  @@index([email])
+  @@index([mobile])
   @@index([status])
 }
 

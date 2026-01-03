@@ -106,8 +106,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    // Check account status - ACTIVE and PENDING_APPROVAL users can login
-    // PENDING_APPROVAL users can login but will be blocked by AccountStatusGuard on protected routes
+    // Check account status - only ACTIVE users can login
     if (user.status === AccountStatus.SUSPENDED) {
       throw new UnauthorizedException(
         'Your account has been suspended. Please contact support.',
